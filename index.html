@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>JS版 表情認識デモ</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #1a1a1a; color: #fff; margin: 0; padding: 20px; }
+    .container { position: relative; display: inline-block; }
+    video, canvas { border-radius: 8px; transform: scaleX(-1); }
+    canvas { position: absolute; top: 0; left: 0; }
+    #result { font-size: 24px; font-weight: bold; margin-top: 15px; color: #00ff80; }
+  </style>
+</head>
+<body>
+
+<h2>MediaPipe JS 表情認識デモ</h2>
+<div class="container">
+  <video id="webcam" autoplay playsinline width="640" height="480"></video>
+  <canvas id="output_canvas" width="640" height="480"></canvas>
+</div>
+<div id="result">AIモデルを読み込み中...</div>
+
+<!-- MediaPipe (tasks-vision) のCDN読み込み -->
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+const video = document.getElementById("webcam");
+const canvas = document.getElementById("output_canvas");
+const ctx = canvas.getContext("2d");
+const resultDiv = document.getElementById("result");
+let faceLandmarker;
+
+// 1. MediaPipe Face Landmarker の初期化
+async function init() {
+  const filesetResolver = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numFaces: 1
+  });
+
+  resultDiv.innerText = "カメラを起動中...";
+  startCamera();
+}
+
+// 2. カメラの起動
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  video.srcObject = stream;
+  video.addEventListener("loadeddata", predictLoop);
+}
+
+// 3. 毎フレーム解析＆表情判定ループ
+function predictLoop() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const startTimeMs = performance.now();
+  const results = faceLandmarker.detectForVideo(video, startTimeMs);
+
+  if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+    const landmarks = results.faceLandmarks[0];
+
+    // --- 特徴量の計算 ---
+    // 上唇(13), 下唇(14), 左口角(61), 右口角(291)
+    const mouthOpen = Math.hypot(landmarks[13].x - landmarks[14].x, landmarks[13].y - landmarks[14].y);
+    const mouthWidth = Math.hypot(landmarks[61].x - landmarks[291].x, landmarks[61].y - landmarks[291].y);
+    const ratio = mouthOpen / mouthWidth; // 口の開き具合の比率
+
+    // 簡易的な表情判定ルール（Pythonで行っていたような特徴量判定）
+    let expression = "😐 通常 (Neutral)";
+    if (ratio > 0.35) {
+      expression = "😲 驚き・口開け (Surprised / Open)";
+    } else if (mouthWidth > 0.42) {
+      expression = "😊 笑顔 (Happy)";
+    }
+
+    resultDiv.innerText = `判定結果: ${expression}`;
+
+    // 顔のランドマーク点（478点）の描画
+    ctx.fillStyle = "#00FF80";
+    for (const pt of landmarks) {
+      ctx.beginPath();
+      ctx.arc(pt.x * canvas.width, pt.y * canvas.height, 1.2, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  } else {
+    resultDiv.innerText = "顔が検出されていません";
+  }
+
+  requestAnimationFrame(predictLoop);
+}
+
+init();
+</script>
+
+</body>
+</html>
