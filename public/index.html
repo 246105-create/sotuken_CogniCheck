@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>リアルタイム・嘘発見器デモ</title>
+  <style>
+    body { font-family: sans-serif; background: #111; color: #fff; text-align: center; padding: 20px; }
+    .gauge-box { margin: 20px auto; width: 320px; padding: 20px; border: 2px solid #333; border-radius: 12px; background: #222; }
+    .score-num { font-size: 64px; font-weight: bold; color: #00ff80; }
+    .status { font-size: 18px; font-weight: bold; color: #ffaa00; margin-top: 10px; }
+    .bar-bg { background: #444; height: 20px; border-radius: 10px; overflow: hidden; margin-top: 15px; }
+    .bar-fill { background: linear-gradient(90deg, #00ff80, #ffff00, #ff0055); height: 100%; width: 0%; transition: width 0.1s; }
+    button, select { padding: 10px 15px; font-size: 16px; margin: 10px; border-radius: 5px; }
+  </style>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+<h2>リアルタイム・ポリグラフ (表情 × 音声)</h2>
+
+<div class="gauge-box">
+  <div>嘘・緊張メーター</div>
+  <div class="score-num" id="score">0%</div>
+  <div class="bar-bg"><div class="bar-fill" id="bar"></div></div>
+  <div class="status" id="status">マイク未起動</div>
+</div>
+
+<button id="startBtn">マイク解析を開始</button>
+<br>
+<label>テスト用表情切替: </label>
+<select id="expressionSelect">
+  <option value="Neutral">😐 真顔</option>
+  <option value="Smile">😊 笑顔</option>
+  <option value="Angry">😡 焦り/怒り</option>
+</select>
+
+<script>
+const socket = io();
+let audioCtx, analyser, microphone, dataArray;
+let isMeasuring = false;
+
+// 1. サーバーからのスコア反映
+socket.on('lie-score-update', (data) => {
+  const scoreEl = document.getElementById('score');
+  const barEl = document.getElementById('bar');
+  const statusEl = document.getElementById('status');
+
+  scoreEl.innerText = `${data.score}%`;
+  barEl.style.width = `${data.score}%`;
+  statusEl.innerText = data.status;
+
+  if (data.score > 70) scoreEl.style.color = "#ff0055";
+  else if (data.score > 40) scoreEl.style.color = "#ffaa00";
+  else scoreEl.style.color = "#00ff80";
+});
+
+// 2. マイク音声のリアルタイム解析
+document.getElementById('startBtn').addEventListener('click', async () => {
+  if (isMeasuring) return;
+
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  microphone = audioCtx.createMediaStreamSource(stream);
+
+  analyser.fftSize = 256;
+  microphone.connect(analyser);
+  dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+  isMeasuring = true;
+  document.getElementById('startBtn').disabled = true;
+
+  // 100ms (0.1秒) ごとに音声を高速解析してバックエンドへ送信
+  setInterval(() => {
+    analyser.getByteFrequencyData(dataArray);
+
+    // 音量（振幅平均）
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+    const volume = sum / dataArray.length;
+
+    // 声のゆらぎ（周波数の分散）
+    let variance = 0;
+    for (let i = 0; i < dataArray.length; i++) variance += Math.abs(dataArray[i] - volume);
+    const pitchVar = variance / dataArray.length;
+
+    // ONNXと組み替える際は、以前作ったONNXの判定テキストをここに渡します
+    const currentExpression = document.getElementById('expressionSelect').value;
+
+    socket.emit('sensor-data', {
+      expression: currentExpression,
+      volume: volume,
+      pitchVar: pitchVar
+    });
+  }, 100);
+});
+</script>
+
+</body>
+</html>
