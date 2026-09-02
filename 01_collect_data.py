@@ -1,97 +1,98 @@
-import cv2
-import mediapipe as mp
 import csv
 import math
 import os
+import urllib.request
+import cv2
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-# --- 設定 ---
-CSV_FILE = "face_data.csv"
-# MediaPipe顔メッシュの準備
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+# 1. 顔検出モデルの自動ダウンロード (初回のみ)
+MODEL_PATH = "face_landmarker.task"
+if not os.path.exists(MODEL_PATH):
+    print("モデルファイル(face_landmarker.task)をダウンロード中...")
+    url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+    urllib.request.urlretrieve(url, MODEL_PATH)
+    print("ダウンロード完了！")
+
+# 2. 最新APIのセットアップ
+base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+options = vision.FaceLandmarkerOptions(
+    base_options=base_options,
+    num_faces=1
 )
+detector = vision.FaceLandmarker.create_from_options(options)
 
-
-# 2点間の距離を計算する関数
+# 距離計算関数
 def calc_dist(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
 
-
-# CSVファイルの初期化（ファイルがない場合のみヘッダーを作成）
+CSV_FILE = "face_data.csv"
 if not os.path.exists(CSV_FILE):
     with open(CSV_FILE, mode='w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["mouth_ratio", "eye_ratio", "eyebrow_dist", "label"])
+        writer.writerow(["f1_mouth_open", "f2_eyebrow_dist", "f3_eye_open", "f4_mouth_width", "label"])
 
 cap = cv2.VideoCapture(0)
-print("カメラを起動しました。")
-print("【操作方法】")
-print(" 't' キー : 現在の顔を「通常（TRUTH: 0）」として保存")
-print(" 'l' キー : 現在の顔を「嘘・焦り（LIE: 1）」として保存")
-print(" 'q' キー : 終了")
+counts = {0: 0, 1: 0, 2: 0}
+
+print("=== データ収集開始 ===")
+print(" [1] キー: 真顔 (Neutral)")
+print(" [2] キー: 笑顔 (Smile)")
+print(" [3] キー: 怒り (Angry)")
+print(" [q] キー: 終了")
 
 while cap.isOpened():
-    success, image = cap.read()
+    success, frame = cap.read()
     if not success:
         break
 
-    # 処理を高速化するために画像をRGBに変換
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(image_rgb)
+    # 画像の変換とランドマーク検出
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    detection_result = detector.detect(mp_image)
 
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            lm = face_landmarks.landmark
+    if detection_result.face_landmarks:
+        lm = detection_result.face_landmarks[0]
 
-            # 1. 口の開き率 (縦の開き / 横の幅)
-            mouth_open = calc_dist(lm[13], lm[14])
-            mouth_width = calc_dist(lm[61], lm[291])
-            mouth_ratio = mouth_open / mouth_width if mouth_width != 0 else 0
+        # 顔幅（正規化用）
+        face_width = calc_dist(lm[33], lm[263])
 
-            # 2. 目の開き率 (左目の縦 / 横)
-            eye_open = calc_dist(lm[159], lm[145])
-            eye_width = calc_dist(lm[33], lm[133])
-            eye_ratio = eye_open / eye_width if eye_width != 0 else 0
+        if face_width > 0:
+            # 特徴量の計算
+            f1 = (calc_dist(lm[13], lm[14]) / calc_dist(lm[61], lm[291]))
+            f2 = (calc_dist(lm[55], lm[285]) / face_width)
+            f3 = (calc_dist(lm[159], lm[145]) / calc_dist(lm[33], lm[133]))
+            f4 = (calc_dist(lm[61], lm[291]) / face_width)
 
-            # 3. 眉間の距離 (左眉の内側と右眉の内側)
-            eyebrow_dist = calc_dist(lm[55], lm[285])
+            # 顔上のランドマーク描画
+            h, w, _ = frame.shape
+            for pt in lm:
+                cx, cy = int(pt.x * w), int(pt.y * h)
+                cv2.circle(frame, (cx, cy), 1, (0, 255, 128), -1)
 
-            # 顔にメッシュを描画（確認用）
-            mp.solutions.drawing_utils.draw_landmarks(
-                image=image,
-                landmark_list=face_landmarks,
-                connections=mp_face_mesh.FACEMESH_TESSELATION,
-                landmark_drawing_spec=None,
-                connection_drawing_spec=mp.solutions.drawing_styles.get_default_face_mesh_tesselation_style()
-            )
+            # 画面表示
+            cv2.putText(frame, f"1: Neutral [{counts[0]}]", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, f"2: Smile   [{counts[1]}]", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, f"3: Angry   [{counts[2]}]", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            # 画面上に現在の数値を表示
-            cv2.putText(image, f"Mouth: {mouth_ratio:.2f}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(image, f"Eye: {eye_ratio:.2f}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(image, f"Eyebrow: {eyebrow_dist:.2f}", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-            # キー入力の受付
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('t') or key == ord('l'):
-                # 't'なら0(Truth)、'l'なら1(Lie)
-                label = 0 if key == ord('t') else 1
+            if key in [ord('1'), ord('2'), ord('3')]:
+                label_map = {ord('1'): 0, ord('2'): 1, ord('3'): 2}
+                label = label_map[key]
 
-                # CSVに追記
                 with open(CSV_FILE, mode='a', newline='') as f:
                     writer = csv.writer(f)
-                    writer.writerow([mouth_ratio, eye_ratio, eyebrow_dist, label])
-                print(f"データを保存しました！ [ラベル: {'TRUTH' if label == 0 else 'LIE'}]")
+                    writer.writerow([f1, f2, f3, f4, label])
 
+                counts[label] += 1
+                print(f"保存成功: ラベル {label} (合計 {sum(counts.values())} 件)")
             elif key == ord('q'):
-                cap.release()
-                cv2.destroyAllWindows()
-                exit()
+                break
 
-    cv2.imshow('Data Collection', image)
+    cv2.imshow('Data Collector', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
 cap.release()
 cv2.destroyAllWindows()
