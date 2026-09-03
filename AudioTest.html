@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>音声解析ダッシュボード（マイク＆ファイル解析対応）</title>
+  <title>音声解析ダッシュボード（ログリセット＆描画時間設定対応）</title>
   <style>
     body {
       font-family: sans-serif;
@@ -12,20 +12,20 @@
       margin: 0;
       padding: 20px;
     }
-    .controls, .save-controls {
+    .controls, .save-controls, .settings-bar {
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
       margin-top: 10px;
       flex-wrap: wrap;
     }
-    .save-controls {
+    .save-controls, .settings-bar {
       background: #2a2a2a;
-      padding: 10px;
+      padding: 8px 15px;
       border-radius: 8px;
       max-width: 880px;
-      margin: 15px auto 0;
+      margin: 10px auto 0;
     }
     .dashboard {
       display: flex;
@@ -56,11 +56,32 @@
       box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
       display: block;
     }
+    #status-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 15px;
+      margin-top: 10px;
+    }
     #status {
       font-size: 18px;
       font-weight: bold;
-      margin-top: 10px;
       color: #00ff80;
+    }
+    #vibratoBadge {
+      display: none;
+      font-size: 14px;
+      font-weight: bold;
+      color: #fff;
+      background: linear-gradient(45deg, #ff007f, #ff00ff);
+      padding: 4px 12px;
+      border-radius: 20px;
+      box-shadow: 0 0 10px rgba(255, 0, 255, 0.6);
+      animation: pulse 0.8s infinite alternate;
+    }
+    @keyframes pulse {
+      from { transform: scale(1); }
+      to { transform: scale(1.08); }
     }
     button, .file-label {
       padding: 8px 16px;
@@ -82,11 +103,13 @@
       color: #888;
       cursor: not-allowed;
     }
-    input[type="file"] {
-      display: none;
+    .btn-reset {
+      background-color: #ff4d4d;
+      color: #fff;
     }
+    input[type="file"] { display: none; }
     input[type="number"] {
-      width: 50px;
+      width: 55px;
       padding: 5px;
       border-radius: 4px;
       border: 1px solid #444;
@@ -106,19 +129,26 @@
 <h2>リアルタイム音声解析ダッシュボード</h2>
 
 <div class="controls">
-  <button id="startButton">🎤 マイクを起動</button>
+  <button id="startButton">🎤 マイク起動</button>
+  <button id="tabButton" style="background-color: #00e5ff;">📺 YouTube等のタブ音声を解析</button>
   <label class="file-label">📁 音声ファイルを選択
     <input type="file" id="fileInput" accept="audio/*">
   </label>
   <button id="pauseButton" disabled>一時停止</button>
+  <button id="resetButton" class="btn-reset">🔄 ログリセット</button>
 </div>
 
-<!-- 音声ファイル用プレイヤー -->
+<!-- ログ描画時間設定バー -->
+<div class="settings-bar">
+  <span>⏱️ リアルタイム ログ描画時間:</span>
+  <label><input type="number" id="logDurationInput" value="5" min="1" max="60"> 分間</label>
+  <span style="font-size: 12px; color: #aaa;">（マイク/タブ音声時のスクロール速度に反映されます）</span>
+</div>
+
 <div id="audioPlayerContainer" style="display: none;">
   <audio id="audioElement" controls></audio>
 </div>
 
-<!-- ログ保存用フォーム -->
 <div class="save-controls">
   <span>💾 ログ保存範囲:</span>
   <label><input type="number" id="startMin" value="0" min="0">分</label>
@@ -129,7 +159,10 @@
   <button id="saveButton" disabled>指定範囲を画像保存</button>
 </div>
 
-<div id="status">待機中...</div>
+<div id="status-container">
+  <div id="status">待機中...</div>
+  <div id="vibratoBadge">✨ ビブラート検知中</div>
+</div>
 
 <div class="dashboard">
   <!-- 1. 波形キャンバス -->
@@ -146,7 +179,7 @@
 
   <!-- 3. 周波数ログキャンバス -->
   <div class="panel">
-    <div class="panel-label" id="logTitle">周波数ログ</div>
+    <div class="panel-label" id="logTitle">周波数ログ (5分間の推移 / 上部ピンク線: ビブラート)</div>
     <canvas id="log_canvas" width="900" height="250"></canvas>
   </div>
 </div>
@@ -167,39 +200,46 @@ offscreenLog.height = 250;
 const offCtx = offscreenLog.getContext("2d", { willReadFrequently: true });
 
 const statusDiv = document.getElementById("status");
+const vibratoBadge = document.getElementById("vibratoBadge");
 const startButton = document.getElementById("startButton");
+const tabButton = document.getElementById("tabButton");
 const fileInput = document.getElementById("fileInput");
 const pauseButton = document.getElementById("pauseButton");
+const resetButton = document.getElementById("resetButton");
 const saveButton = document.getElementById("saveButton");
+const logDurationInput = document.getElementById("logDurationInput");
 const audioElement = document.getElementById("audioElement");
 const audioPlayerContainer = document.getElementById("audioPlayerContainer");
 const logTitle = document.getElementById("logTitle");
 
 let audioContext;
 let analyser;
-let micStreamSource, mediaElementSource;
+let micStreamSource, tabStreamSource, mediaElementSource;
 let timeData, freqData;
 let bufferLength;
 
-let currentMode = null; // 'mic' または 'file'
+let currentMode = null; // 'mic', 'tab', 'file'
 let isPaused = false;
-let fileDuration = 0; // 音声ファイルの長さ（秒）
+let fileDuration = 0;
 
-const MIC_LOG_DURATION_SEC = 300; // マイク時は5分
-const LOG_INTERVAL_MS = (MIC_LOG_DURATION_SEC * 1000) / logCanvas.width;
+// 描画時間の動的設定変数
+let micLogDurationSec = parseInt(logDurationInput.value) * 60; // 初期値 300秒 (5分)
+let logIntervalMs = (micLogDurationSec * 1000) / logCanvas.width;
 let lastLogTime = 0;
 
-// 初期化（共通）
+let pitchHistory = [];
+const PITCH_HISTORY_MAX = 45;
+let isVibratoDetected = false;
+
 function initAudioContext() {
   if (!audioContext) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     analyser = audioContext.createAnalyser();
-    analyser.fftSize = 1024;
+    analyser.fftSize = 2048;
     bufferLength = analyser.frequencyBinCount;
-    timeData = new Uint8Array(bufferLength);
+    timeData = new Uint8Array(analyser.fftSize);
     freqData = new Uint8Array(bufferLength);
 
-    // ログ領域の黒塗り初期化
     offCtx.fillStyle = "#000";
     offCtx.fillRect(0, 0, offscreenLog.width, offscreenLog.height);
 
@@ -210,15 +250,41 @@ function initAudioContext() {
   }
 }
 
-// マイク起動ボタン
+// 描画時間設定変更イベント
+logDurationInput.addEventListener("change", () => {
+  let val = parseInt(logDurationInput.value) || 5;
+  if (val < 1) val = 1;
+  logDurationInput.value = val;
+
+  micLogDurationSec = val * 60;
+  logIntervalMs = (micLogDurationSec * 1000) / logCanvas.width;
+
+  if (currentMode === "mic" || currentMode === "tab") {
+    logTitle.innerText = `周波数ログ (${val}分間の推移 / 上部ピンク線: ビブラート)`;
+    document.getElementById("endMin").value = val;
+    resetLog();
+  }
+});
+
+// リセットボタンイベント
+resetButton.addEventListener("click", resetLog);
+
+function resetLog() {
+  offCtx.fillStyle = "#000";
+  offCtx.fillRect(0, 0, offscreenLog.width, offscreenLog.height);
+  logCtx.fillStyle = "#000";
+  logCtx.fillRect(0, 0, logCanvas.width, logCanvas.height);
+  pitchHistory = [];
+  lastLogTime = performance.now();
+}
+
+// 1. マイク起動
 startButton.addEventListener("click", async () => {
   initAudioContext();
   switchMode("mic");
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-    // スピーカーへのフィードバック防止のためアナライザー出力を切断
     analyser.disconnect();
 
     if (micStreamSource) micStreamSource.disconnect();
@@ -229,15 +295,55 @@ startButton.addEventListener("click", async () => {
     pauseButton.disabled = false;
     saveButton.disabled = false;
     audioPlayerContainer.style.display = "none";
-    logTitle.innerText = "周波数ログ (5分間の推移)";
+    logTitle.innerText = `周波数ログ (${logDurationInput.value}分間の推移 / 上部ピンク線: ビブラート)`;
 
   } catch (e) {
-    statusDiv.innerText = "エラー: マイクへのアクセスが拒否されました";
+    statusDiv.innerText = "エラー: マイクの取得に失敗しました";
     console.error(e);
   }
 });
 
-// ファイル選択イベント
+// 2. YouTube等のタブ音声キャプチャ
+tabButton.addEventListener("click", async () => {
+  initAudioContext();
+  switchMode("tab");
+
+  try {
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: { echoCancellation: false, noiseSuppression: false }
+    });
+
+    const audioTrack = displayStream.getAudioTracks()[0];
+    if (!audioTrack) {
+      alert("音声が選択されていません。「タブの音声を共有」にチェックを入れてください。");
+      statusDiv.innerText = "エラー: 音声トラックが検出されませんでした";
+      return;
+    }
+
+    analyser.disconnect();
+
+    if (tabStreamSource) tabStreamSource.disconnect();
+    tabStreamSource = audioContext.createMediaStreamSource(new MediaStream([audioTrack]));
+    tabStreamSource.connect(analyser);
+
+    statusDiv.innerText = "📺 タブ/画面音声 解析中 (YouTube等)";
+    pauseButton.disabled = false;
+    saveButton.disabled = false;
+    audioPlayerContainer.style.display = "none";
+    logTitle.innerText = `周波数ログ (${logDurationInput.value}分間の推移 / 上部ピンク線: ビブラート)`;
+
+    audioTrack.onended = () => {
+      statusDiv.innerText = "📺 音声共有が終了しました";
+    };
+
+  } catch (e) {
+    statusDiv.innerText = "タブ音声の選択がキャンセルされました";
+    console.error(e);
+  }
+});
+
+// 3. ファイル選択
 fileInput.addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -251,21 +357,18 @@ fileInput.addEventListener("change", (e) => {
 
   audioElement.onloadedmetadata = () => {
     fileDuration = audioElement.duration;
-    logTitle.innerText = `周波数ログ (ファイル全体: ${formatTime(fileDuration)})`;
+    logTitle.innerText = `周波数ログ (全体: ${formatTime(fileDuration)} / 上部ピンク線: ビブラート)`;
 
-    // 保存フォームの初期値をファイルの長さに合わせる
     document.getElementById("startMin").value = 0;
     document.getElementById("startSec").value = 0;
     document.getElementById("endMin").value = Math.floor(fileDuration / 60);
     document.getElementById("endSec").value = Math.floor(fileDuration % 60);
   };
 
-  // 音声ファイル用のソースノード作成（1回のみ生成して再利用）
   if (!mediaElementSource) {
     mediaElementSource = audioContext.createMediaElementSource(audioElement);
   }
 
-  // ファイル音声はスピーカーへ出力する必要があるため destination に接続
   mediaElementSource.connect(analyser);
   analyser.connect(audioContext.destination);
 
@@ -274,23 +377,19 @@ fileInput.addEventListener("change", (e) => {
   saveButton.disabled = false;
 });
 
-// モード切替時のリセット処理
 function switchMode(newMode) {
   currentMode = newMode;
   isPaused = false;
   pauseButton.innerText = "一時停止";
   pauseButton.style.backgroundColor = "#00ff80";
 
-  // オフスクリーンログキャンバスのクリア
-  offCtx.fillStyle = "#000";
-  offCtx.fillRect(0, 0, offscreenLog.width, offscreenLog.height);
+  resetLog();
 
-  if (newMode === "mic" && audioElement) {
+  if (newMode !== "file" && audioElement) {
     audioElement.pause();
   }
 }
 
-// 一時停止ボタン
 pauseButton.addEventListener("click", () => {
   isPaused = !isPaused;
   if (isPaused) {
@@ -301,14 +400,102 @@ pauseButton.addEventListener("click", () => {
   } else {
     pauseButton.innerText = "一時停止";
     pauseButton.style.backgroundColor = "#00ff80";
-    statusDiv.innerText = currentMode === "mic" ? "🎤 マイク入力解析中..." : "📁 ファイル解析中...";
+    statusDiv.innerText = "🎤/📺 解析中...";
     if (currentMode === "file") audioElement.play();
   }
 });
 
 saveButton.addEventListener("click", saveLogRange);
 
-// 描画メインループ
+// ピッチ検出
+function autoCorrelate(buffer, sampleRate) {
+  let size = buffer.length;
+  let rms = 0;
+  for (let i = 0; i < size; i++) {
+    let val = (buffer[i] - 128) / 128;
+    rms += val * val;
+  }
+  rms = Math.sqrt(rms / size);
+  if (rms < 0.03) return -1;
+
+  let r1 = 0, r2 = size - 1, thres = 0.2;
+  for (let i = 0; i < size / 2; i++) {
+    if (Math.abs((buffer[i] - 128) / 128) < thres) { r1 = i; break; }
+  }
+  for (let i = 1; i < size / 2; i++) {
+    if (Math.abs((buffer[size - i] - 128) / 128) < thres) { r2 = size - i; break; }
+  }
+
+  let buf = buffer.slice(r1, r2);
+  size = buf.length;
+
+  let c = new Float32Array(size);
+  for (let i = 0; i < size; i++) {
+    for (let j = 0; j < size - i; j++) {
+      c[i] = c[i] + ((buf[j] - 128) / 128) * ((buf[j + i] - 128) / 128);
+    }
+  }
+
+  let d = 0;
+  while (c[d] > c[d + 1]) d++;
+  let maxval = -1, maxpos = -1;
+  for (let i = d; i < size; i++) {
+    if (c[i] > maxval) {
+      maxval = c[i];
+      maxpos = i;
+    }
+  }
+  let T0 = maxpos;
+  if (T0 <= 0) return -1;
+
+  return sampleRate / T0;
+}
+
+// ビブラート分析
+function analyzeVibrato() {
+  const pitch = autoCorrelate(timeData, audioContext.sampleRate);
+
+  if (pitch > 70 && pitch < 1000) {
+    const note = 69 + 12 * Math.log2(pitch / 440);
+    pitchHistory.push(note);
+  } else {
+    pitchHistory.push(null);
+  }
+
+  if (pitchHistory.length > PITCH_HISTORY_MAX) {
+    pitchHistory.shift();
+  }
+
+  const validPitches = pitchHistory.filter(p => p !== null);
+  if (validPitches.length < PITCH_HISTORY_MAX * 0.6) {
+    isVibratoDetected = false;
+    vibratoBadge.style.display = "none";
+    return;
+  }
+
+  const avgPitch = validPitches.reduce((a, b) => a + b, 0) / validPitches.length;
+  const centered = validPitches.map(p => p - avgPitch);
+
+  let zeroCrossings = 0;
+  for (let i = 1; i < centered.length; i++) {
+    if ((centered[i - 1] < 0 && centered[i] >= 0) || (centered[i - 1] >= 0 && centered[i] < 0)) {
+      zeroCrossings++;
+    }
+  }
+
+  const maxDev = Math.max(...centered);
+  const minDev = Math.min(...centered);
+  const depth = maxDev - minDev;
+
+  if (zeroCrossings >= 5 && zeroCrossings <= 13 && depth >= 0.35 && depth <= 2.5) {
+    isVibratoDetected = true;
+    vibratoBadge.style.display = "inline-block";
+  } else {
+    isVibratoDetected = false;
+    vibratoBadge.style.display = "none";
+  }
+}
+
 function drawLoop(timestamp) {
   requestAnimationFrame(drawLoop);
 
@@ -317,12 +504,13 @@ function drawLoop(timestamp) {
   analyser.getByteTimeDomainData(timeData);
   analyser.getByteFrequencyData(freqData);
 
+  analyzeVibrato();
+
   drawWaveform();
   drawSpectrum();
   drawSpectrogramLog(timestamp);
 }
 
-// 1. 波形描画
 function drawWaveform() {
   waveCtx.fillStyle = "#000000";
   waveCtx.fillRect(0, 0, waveCanvas.width, waveCanvas.height);
@@ -337,10 +525,10 @@ function drawWaveform() {
   waveCtx.strokeStyle = "#00FF80";
   waveCtx.beginPath();
 
-  const sliceWidth = waveCanvas.width * 1.0 / bufferLength;
+  const sliceWidth = waveCanvas.width * 1.0 / timeData.length;
   let x = 0;
 
-  for (let i = 0; i < bufferLength; i++) {
+  for (let i = 0; i < timeData.length; i++) {
     const v = timeData[i] / 128.0;
     const y = v * (waveCanvas.height / 2);
 
@@ -353,7 +541,6 @@ function drawWaveform() {
   waveCtx.stroke();
 }
 
-// 2. 周波数スペクトラム描画
 function drawSpectrum() {
   specCtx.fillStyle = "#000000";
   specCtx.fillRect(0, 0, specCanvas.width, specCanvas.height);
@@ -373,7 +560,6 @@ function drawSpectrum() {
     x += barWidth + 1;
   }
 
-  // 目盛り (Hz & dB)
   const nyquist = audioContext.sampleRate / 2;
   specCtx.fillStyle = "rgba(255, 255, 255, 0.6)";
   specCtx.strokeStyle = "rgba(255, 255, 255, 0.2)";
@@ -406,11 +592,9 @@ function drawSpectrum() {
   });
 }
 
-// 3. 周波数ログ（スペクトログラム）描画
 function drawSpectrogramLog(timestamp) {
-  if (currentMode === "mic") {
-    // --- マイクモード：スクロール描画 ---
-    if (timestamp - lastLogTime >= LOG_INTERVAL_MS) {
+  if (currentMode === "mic" || currentMode === "tab") {
+    if (timestamp - lastLogTime >= logIntervalMs) {
       lastLogTime = timestamp;
 
       offCtx.drawImage(
@@ -429,13 +613,16 @@ function drawSpectrogramLog(timestamp) {
         const y = offscreenLog.height - ((i / bufferLength) * offscreenLog.height);
         offCtx.fillRect(offscreenLog.width - 1, y - 1, 1, 2);
       }
+
+      if (isVibratoDetected) {
+        offCtx.fillStyle = "#ff007f";
+        offCtx.fillRect(offscreenLog.width - 1, 0, 1, 8);
+      }
     }
   } else if (currentMode === "file" && fileDuration > 0 && !audioElement.paused) {
-    // --- 音声ファイルモード：時間座標マッピング描画 ---
     const currentPosRatio = audioElement.currentTime / fileDuration;
     const targetX = Math.floor(currentPosRatio * offscreenLog.width);
 
-    // 再生位置の列へ書き込み
     offCtx.fillStyle = "#000000";
     offCtx.fillRect(targetX, 0, 2, offscreenLog.height);
 
@@ -446,11 +633,15 @@ function drawSpectrogramLog(timestamp) {
       const y = offscreenLog.height - ((i / bufferLength) * offscreenLog.height);
       offCtx.fillRect(targetX, y - 1, 2, 2);
     }
+
+    if (isVibratoDetected) {
+      offCtx.fillStyle = "#ff007f";
+      offCtx.fillRect(targetX, 0, 2, 8);
+    }
   }
 
   logCtx.drawImage(offscreenLog, 0, 0);
 
-  // 周波数目盛り (Hz)
   const nyquist = audioContext.sampleRate / 2;
   logCtx.fillStyle = "rgba(255, 255, 255, 0.7)";
   logCtx.strokeStyle = "rgba(255, 255, 255, 0.25)";
@@ -468,12 +659,14 @@ function drawSpectrogramLog(timestamp) {
     }
   });
 
-  // --- 時間目盛りの描画 ---
-  if (currentMode === "mic") {
-    // マイクモード：固定相対目盛り ( -5:00 ～ 0:00 )
-    const stepSec = 30;
-    for (let offset = 0; offset <= MIC_LOG_DURATION_SEC; offset += stepSec) {
-      const posX = logCanvas.width - (offset / MIC_LOG_DURATION_SEC) * logCanvas.width;
+  if (currentMode === "mic" || currentMode === "tab") {
+    // 描画時間に応じた動的ステップ幅調整
+    let stepSec = 30;
+    if (micLogDurationSec <= 60) stepSec = 10;
+    else if (micLogDurationSec > 600) stepSec = 60;
+
+    for (let offset = 0; offset <= micLogDurationSec; offset += stepSec) {
+      const posX = logCanvas.width - (offset / micLogDurationSec) * logCanvas.width;
       logCtx.beginPath();
       logCtx.moveTo(posX, 0);
       logCtx.lineTo(posX, logCanvas.height);
@@ -482,11 +675,10 @@ function drawSpectrogramLog(timestamp) {
       const label = formatRelativeTime(offset);
       let textX = posX - 12;
       if (offset === 0) textX = posX - 25;
-      if (offset === MIC_LOG_DURATION_SEC) textX = posX + 4;
+      if (offset === micLogDurationSec) textX = posX + 4;
       logCtx.fillText(label, textX, 12);
     }
   } else if (currentMode === "file" && fileDuration > 0) {
-    // ファイルモード：絶対時間目盛り ( 0:00 ～ 全体長 ) & 再生ヘッド表示
     const numTicks = 6;
     for (let i = 0; i <= numTicks; i++) {
       const posX = (i / numTicks) * logCanvas.width;
@@ -504,7 +696,6 @@ function drawSpectrogramLog(timestamp) {
       logCtx.fillText(label, textX, 12);
     }
 
-    // 現在再生位置を示す縦ライン（再生ヘッド）
     const playheadX = (audioElement.currentTime / fileDuration) * logCanvas.width;
     logCtx.strokeStyle = "#00ff80";
     logCtx.lineWidth = 1.5;
@@ -528,7 +719,6 @@ function formatTime(sec) {
   return `${m}:${s}`;
 }
 
-// 範囲指定保存処理
 function saveLogRange() {
   const startM = parseInt(document.getElementById("startMin").value) || 0;
   const startS = parseInt(document.getElementById("startSec").value) || 0;
@@ -552,10 +742,6 @@ function saveLogRange() {
     }
     xStart = (reqStartSec / fileDuration) * logCanvas.width;
     xEnd = (reqEndSec / fileDuration) * logCanvas.width;
-  } else {
-    // マイクモード時
-    xStart = 0;
-    xEnd = logCanvas.width;
   }
 
   const cropWidth = xEnd - xStart;
